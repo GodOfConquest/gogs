@@ -7,10 +7,13 @@ package models
 import (
 	"database/sql"
 	"fmt"
+	"net/url"
 	"os"
 	"path"
 	"strings"
+	"time"
 
+	"github.com/Unknwon/com"
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/go-xorm/core"
 	"github.com/go-xorm/xorm"
@@ -40,6 +43,25 @@ func sessionRelease(sess *xorm.Session) {
 	sess.Close()
 }
 
+// Note: get back time.Time from database Go sees it at UTC where they are really Local.
+// 	So this function makes correct timezone offset.
+func regulateTimeZone(t time.Time) time.Time {
+	if setting.UseSQLite3 {
+		return t
+	}
+
+	zone := t.Local().Format("-0700")
+	if len(zone) != 5 {
+		return t
+	}
+	offset := com.StrTo(zone[2:3]).MustInt()
+
+	if zone[0] == '-' {
+		return t.Add(time.Duration(offset) * time.Hour)
+	}
+	return t.Add(-1 * time.Duration(offset) * time.Hour)
+}
+
 var (
 	x         *xorm.Engine
 	tables    []interface{}
@@ -50,18 +72,25 @@ var (
 	}
 
 	EnableSQLite3 bool
+	EnableTidb    bool
 )
 
 func init() {
 	tables = append(tables,
 		new(User), new(PublicKey), new(Oauth2), new(AccessToken),
-		new(Repository), new(Collaboration), new(Access),
+		new(Repository), new(DeployKey), new(Collaboration), new(Access),
 		new(Watch), new(Star), new(Follow), new(Action),
-		new(Issue), new(Comment), new(Attachment), new(IssueUser), new(Label), new(Milestone),
+		new(Issue), new(PullRequest), new(Comment), new(Attachment), new(IssueUser),
+		new(Label), new(IssueLabel), new(Milestone),
 		new(Mirror), new(Release), new(LoginSource), new(Webhook),
 		new(UpdateTask), new(HookTask),
 		new(Team), new(OrgUser), new(TeamUser), new(TeamRepo),
 		new(Notice), new(EmailAddress))
+
+	gonicNames := []string{"SSL"}
+	for _, name := range gonicNames {
+		core.LintGonicMapper[name] = true
+	}
 }
 
 func LoadModelsConfig() {
@@ -90,10 +119,10 @@ func getEngine() (*xorm.Engine, error) {
 	switch DbCfg.Type {
 	case "mysql":
 		if DbCfg.Host[0] == '/' { // looks like a unix socket
-			cnnstr = fmt.Sprintf("%s:%s@unix(%s)/%s?charset=utf8",
+			cnnstr = fmt.Sprintf("%s:%s@unix(%s)/%s?charset=utf8&parseTime=true",
 				DbCfg.User, DbCfg.Passwd, DbCfg.Host, DbCfg.Name)
 		} else {
-			cnnstr = fmt.Sprintf("%s:%s@tcp(%s)/%s?charset=utf8",
+			cnnstr = fmt.Sprintf("%s:%s@tcp(%s)/%s?charset=utf8&parseTime=true",
 				DbCfg.User, DbCfg.Passwd, DbCfg.Host, DbCfg.Name)
 		}
 	case "postgres":
@@ -105,14 +134,24 @@ func getEngine() (*xorm.Engine, error) {
 		if len(fields) > 1 && len(strings.TrimSpace(fields[1])) > 0 {
 			port = fields[1]
 		}
-		cnnstr = fmt.Sprintf("user=%s password=%s host=%s port=%s dbname=%s sslmode=%s",
-			DbCfg.User, DbCfg.Passwd, host, port, DbCfg.Name, DbCfg.SSLMode)
+		cnnstr = fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=%s",
+			url.QueryEscape(DbCfg.User), url.QueryEscape(DbCfg.Passwd), host, port, DbCfg.Name, DbCfg.SSLMode)
 	case "sqlite3":
 		if !EnableSQLite3 {
 			return nil, fmt.Errorf("Unknown database type: %s", DbCfg.Type)
 		}
-		os.MkdirAll(path.Dir(DbCfg.Path), os.ModePerm)
+		if err := os.MkdirAll(path.Dir(DbCfg.Path), os.ModePerm); err != nil {
+			return nil, fmt.Errorf("Fail to create directories: %v", err)
+		}
 		cnnstr = "file:" + DbCfg.Path + "?cache=shared&mode=rwc"
+	case "tidb":
+		if !EnableTidb {
+			return nil, fmt.Errorf("Unknown database type: %s", DbCfg.Type)
+		}
+		if err := os.MkdirAll(path.Dir(DbCfg.Path), os.ModePerm); err != nil {
+			return nil, fmt.Errorf("Fail to create directories: %v", err)
+		}
+		cnnstr = "goleveldb://" + DbCfg.Path
 	default:
 		return nil, fmt.Errorf("Unknown database type: %s", DbCfg.Type)
 	}
@@ -122,17 +161,17 @@ func getEngine() (*xorm.Engine, error) {
 func NewTestEngine(x *xorm.Engine) (err error) {
 	x, err = getEngine()
 	if err != nil {
-		return fmt.Errorf("connect to database: %v", err)
+		return fmt.Errorf("Connect to database: %v", err)
 	}
 
 	x.SetMapper(core.GonicMapper{})
-	return x.Sync(tables...)
+	return x.StoreEngine("InnoDB").Sync2(tables...)
 }
 
 func SetEngine() (err error) {
 	x, err = getEngine()
 	if err != nil {
-		return fmt.Errorf("connect to database: %v", err)
+		return fmt.Errorf("Fail to connect to database: %v", err)
 	}
 
 	x.SetMapper(core.GonicMapper{})
@@ -144,7 +183,7 @@ func SetEngine() (err error) {
 
 	f, err := os.Create(logPath)
 	if err != nil {
-		return fmt.Errorf("models.init(fail to create xorm.log): %v", err)
+		return fmt.Errorf("Fail to create xorm.log: %v", err)
 	}
 	x.SetLogger(xorm.NewSimpleLogger(f))
 

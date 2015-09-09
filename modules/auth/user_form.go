@@ -12,27 +12,38 @@ import (
 )
 
 type InstallForm struct {
-	DbType             string `binding:"Required"`
-	DbHost             string
-	DbUser             string
-	DbPasswd           string
-	DbName             string
-	SSLMode            string
-	DbPath             string
-	RepoRootPath       string `binding:"Required"`
-	RunUser            string `binding:"Required"`
-	Domain             string `binding:"Required"`
-	HTTPPort           string `binding:"Required"`
-	AppUrl             string `binding:"Required"`
-	SMTPHost           string
-	SMTPEmail          string
-	SMTPPasswd         string
-	RegisterConfirm    string
-	MailNotify         string
-	AdminName          string `binding:"Required;AlphaDashDot;MaxSize(30)"`
-	AdminPasswd        string `binding:"Required;MinSize(6);MaxSize(255)"`
-	AdminConfirmPasswd string `binding:"Required;MinSize(6);MaxSize(255)"`
-	AdminEmail         string `binding:"Required;Email;MaxSize(50)"`
+	DbType   string `binding:"Required"`
+	DbHost   string
+	DbUser   string
+	DbPasswd string
+	DbName   string
+	SSLMode  string
+	DbPath   string
+
+	AppName      string `binding:"Required" locale:"install.app_name"`
+	RepoRootPath string `binding:"Required"`
+	RunUser      string `binding:"Required"`
+	Domain       string `binding:"Required"`
+	SSHPort      int
+	HTTPPort     string `binding:"Required"`
+	AppUrl       string `binding:"Required"`
+
+	SMTPHost        string
+	SMTPFrom        string
+	SMTPEmail       string `binding:"OmitEmpty;Email;MaxSize(50)" locale:"install.mailer_user"`
+	SMTPPasswd      string
+	RegisterConfirm bool
+	MailNotify      bool
+
+	OfflineMode         bool
+	DisableGravatar     bool
+	DisableRegistration bool
+	RequireSignInView   bool
+
+	AdminName          string `binding:"OmitEmpty;AlphaDashDot;MaxSize(30)" locale:"install.admin_name"`
+	AdminPasswd        string `binding:"OmitEmpty;MaxSize(255)" locale:"install.admin_password"`
+	AdminConfirmPasswd string
+	AdminEmail         string `binding:"OmitEmpty;Email;MaxSize(50)" locale:"install.admin_email"`
 }
 
 func (f *InstallForm) Validate(ctx *macaron.Context, errs binding.Errors) binding.Errors {
@@ -48,8 +59,8 @@ func (f *InstallForm) Validate(ctx *macaron.Context, errs binding.Errors) bindin
 
 type RegisterForm struct {
 	UserName  string `form:"uname" binding:"Required;AlphaDashDot;MaxSize(35)"`
-	Email     string `form:"email" binding:"Required;Email;MaxSize(50)"`
-	Password  string `form:"password" binding:"Required;MinSize(6);MaxSize(255)"`
+	Email     string `form:"email" binding:"Required;Email;MaxSize(254)"`
+	Password  string `form:"password" binding:"Required;MaxSize(255)"`
 	Retype    string `form:"retype"`
 	LoginType string `form:"logintype"`
 	LoginName string `form:"loginname"`
@@ -60,8 +71,8 @@ func (f *RegisterForm) Validate(ctx *macaron.Context, errs binding.Errors) bindi
 }
 
 type SignInForm struct {
-	UserName string `form:"uname" binding:"Required;MaxSize(35)"`
-	Password string `form:"password" binding:"Required;MinSize(6);MaxSize(255)"`
+	UserName string `form:"uname" binding:"Required;MaxSize(254)"`
+	Password string `form:"password" binding:"Required;MaxSize(255)"`
 	Remember bool   `form:"remember"`
 }
 
@@ -77,12 +88,12 @@ func (f *SignInForm) Validate(ctx *macaron.Context, errs binding.Errors) binding
 //         \/         \/                                   \/        \/        \/
 
 type UpdateProfileForm struct {
-	UserName string `form:"uname" binding:"Required;MaxSize(35)"`
-	FullName string `form:"fullname" binding:"MaxSize(100)"`
-	Email    string `form:"email" binding:"Required;Email;MaxSize(50)"`
-	Website  string `form:"website" binding:"Url;MaxSize(100)"`
-	Location string `form:"location" binding:"MaxSize(50)"`
-	Avatar   string `form:"avatar" binding:"Required;Email;MaxSize(50)"`
+	Name     string `binding:"Required;MaxSize(35)"`
+	FullName string `binding:"MaxSize(100)"`
+	Email    string `binding:"Required;Email;MaxSize(254)"`
+	Website  string `binding:"Url;MaxSize(100)"`
+	Location string `binding:"MaxSize(50)"`
+	Gravatar string `binding:"Required;Email;MaxSize(254)"`
 }
 
 func (f *UpdateProfileForm) Validate(ctx *macaron.Context, errs binding.Errors) binding.Errors {
@@ -90,8 +101,8 @@ func (f *UpdateProfileForm) Validate(ctx *macaron.Context, errs binding.Errors) 
 }
 
 type UploadAvatarForm struct {
-	Enable bool                  `form:"enable"`
-	Avatar *multipart.FileHeader `form:"avatar"`
+	Enable bool
+	Avatar *multipart.FileHeader
 }
 
 func (f *UploadAvatarForm) Validate(ctx *macaron.Context, errs binding.Errors) binding.Errors {
@@ -107,8 +118,8 @@ func (f *AddEmailForm) Validate(ctx *macaron.Context, errs binding.Errors) bindi
 }
 
 type ChangePasswordForm struct {
-	OldPassword string `form:"old_password" binding:"Required;MinSize(6);MaxSize(255)"`
-	Password    string `form:"password" binding:"Required;MinSize(6);MaxSize(255)"`
+	OldPassword string `form:"old_password" binding:"Required;MinSize(1);MaxSize(255)"`
+	Password    string `form:"password" binding:"Required;MaxSize(255)"`
 	Retype      string `form:"retype"`
 }
 
@@ -117,8 +128,8 @@ func (f *ChangePasswordForm) Validate(ctx *macaron.Context, errs binding.Errors)
 }
 
 type AddSSHKeyForm struct {
-	SSHTitle string `form:"title" binding:"Required"`
-	Content  string `form:"content" binding:"Required"`
+	Title   string `binding:"Required;MaxSize(50)"`
+	Content string `binding:"Required"`
 }
 
 func (f *AddSSHKeyForm) Validate(ctx *macaron.Context, errs binding.Errors) binding.Errors {
@@ -126,7 +137,7 @@ func (f *AddSSHKeyForm) Validate(ctx *macaron.Context, errs binding.Errors) bind
 }
 
 type NewAccessTokenForm struct {
-	Name string `form:"name" binding:"Required"`
+	Name string `binding:"Required"`
 }
 
 func (f *NewAccessTokenForm) Validate(ctx *macaron.Context, errs binding.Errors) binding.Errors {

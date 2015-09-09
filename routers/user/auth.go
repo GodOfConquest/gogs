@@ -42,49 +42,22 @@ func SignIn(ctx *middleware.Context) {
 	}
 
 	// Check auto-login.
-	uname := ctx.GetCookie(setting.CookieUserName)
-	if len(uname) == 0 {
-		ctx.HTML(200, SIGNIN)
-		return
-	}
-
-	isSucceed := false
-	defer func() {
-		if !isSucceed {
-			log.Trace("auto-login cookie cleared: %s", uname)
-			ctx.SetCookie(setting.CookieUserName, "", -1, setting.AppSubUrl)
-			ctx.SetCookie(setting.CookieRememberName, "", -1, setting.AppSubUrl)
-			return
-		}
-	}()
-
-	u, err := models.GetUserByName(uname)
+	isSucceed, err := middleware.AutoSignIn(ctx)
 	if err != nil {
-		if err != models.ErrUserNotExist {
-			ctx.Handle(500, "GetUserByName", err)
-		} else {
-			ctx.HTML(200, SIGNIN)
+		ctx.Handle(500, "AutoSignIn", err)
+		return
+	}
+
+	if isSucceed {
+		if redirectTo, _ := url.QueryUnescape(ctx.GetCookie("redirect_to")); len(redirectTo) > 0 {
+			ctx.SetCookie("redirect_to", "", -1, setting.AppSubUrl)
+			ctx.Redirect(redirectTo)
 		}
+		ctx.Redirect(setting.AppSubUrl + "/")
 		return
 	}
 
-	if val, _ := ctx.GetSuperSecureCookie(
-		base.EncodeMd5(u.Rands+u.Passwd), setting.CookieRememberName); val != u.Name {
-		ctx.HTML(200, SIGNIN)
-		return
-	}
-
-	isSucceed = true
-
-	ctx.Session.Set("uid", u.Id)
-	ctx.Session.Set("uname", u.Name)
-	if redirectTo, _ := url.QueryUnescape(ctx.GetCookie("redirect_to")); len(redirectTo) > 0 {
-		ctx.SetCookie("redirect_to", "", -1, setting.AppSubUrl)
-		ctx.Redirect(redirectTo)
-		return
-	}
-
-	ctx.Redirect(setting.AppSubUrl + "/")
+	ctx.HTML(200, SIGNIN)
 }
 
 func SignInPost(ctx *middleware.Context, form auth.SignInForm) {
@@ -105,7 +78,7 @@ func SignInPost(ctx *middleware.Context, form auth.SignInForm) {
 
 	u, err := models.UserSignIn(form.UserName, form.Password)
 	if err != nil {
-		if err == models.ErrUserNotExist {
+		if models.IsErrUserNotExist(err) {
 			ctx.RenderWithErr(ctx.Tr("form.username_password_incorrect"), SIGNIN, &form)
 		} else {
 			ctx.Handle(500, "UserSignIn", err)
@@ -247,24 +220,36 @@ func SignUpPost(ctx *middleware.Context, cpt *captcha.Captcha, form auth.Registe
 		Passwd:   form.Password,
 		IsActive: !setting.Service.RegisterEmailConfirm || isOauth,
 	}
-
 	if err := models.CreateUser(u); err != nil {
-		switch err {
-		case models.ErrUserAlreadyExist:
+		switch {
+		case models.IsErrUserAlreadyExist(err):
 			ctx.Data["Err_UserName"] = true
 			ctx.RenderWithErr(ctx.Tr("form.username_been_taken"), SIGNUP, &form)
-		case models.ErrEmailAlreadyUsed:
+		case models.IsErrEmailAlreadyUsed(err):
 			ctx.Data["Err_Email"] = true
 			ctx.RenderWithErr(ctx.Tr("form.email_been_used"), SIGNUP, &form)
-		case models.ErrUserNameIllegal:
+		case models.IsErrNameReserved(err):
 			ctx.Data["Err_UserName"] = true
-			ctx.RenderWithErr(ctx.Tr("form.illegal_username"), SIGNUP, &form)
+			ctx.RenderWithErr(ctx.Tr("user.form.name_reserved", err.(models.ErrNameReserved).Name), SIGNUP, &form)
+		case models.IsErrNamePatternNotAllowed(err):
+			ctx.Data["Err_UserName"] = true
+			ctx.RenderWithErr(ctx.Tr("user.form.name_pattern_not_allowed", err.(models.ErrNamePatternNotAllowed).Pattern), SIGNUP, &form)
 		default:
 			ctx.Handle(500, "CreateUser", err)
 		}
 		return
 	}
 	log.Trace("Account created: %s", u.Name)
+
+	// Auto-set admin for the only user.
+	if models.CountUsers() == 1 {
+		u.IsAdmin = true
+		u.IsActive = true
+		if err := models.UpdateUser(u); err != nil {
+			ctx.Handle(500, "UpdateUser", err)
+			return
+		}
+	}
 
 	// Bind social account.
 	if isOauth {
@@ -325,7 +310,7 @@ func Activate(ctx *middleware.Context) {
 		user.IsActive = true
 		user.Rands = models.GetUserSalt()
 		if err := models.UpdateUser(user); err != nil {
-			if err == models.ErrUserNotExist {
+			if models.IsErrUserNotExist(err) {
 				ctx.Error(404)
 			} else {
 				ctx.Handle(500, "UpdateUser", err)
@@ -388,7 +373,7 @@ func ForgotPasswdPost(ctx *middleware.Context) {
 	email := ctx.Query("email")
 	u, err := models.GetUserByEmail(email)
 	if err != nil {
-		if err == models.ErrUserNotExist {
+		if models.IsErrUserNotExist(err) {
 			ctx.Data["Err_Email"] = true
 			ctx.RenderWithErr(ctx.Tr("auth.email_not_associate"), FORGOT_PASSWORD, nil)
 		} else {

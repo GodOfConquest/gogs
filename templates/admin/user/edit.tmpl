@@ -20,7 +20,7 @@
                                         <option value="0-0">{{.i18n.Tr "admin.users.local"}}</option>
 									    {{$tp := .User.LoginSource}}
 									    {{range $key, $val := .LoginSources}}
-					  					<option value="{{$val.Type}}-{{$val.Id}}"{{if eq $val.Id $tp}} selected{{end}}>{{$val.Name}}</option>
+					  					<option value="{{$val.Type}}-{{$val.ID}}"{{if eq $val.ID $tp}} selected{{end}}>{{$val.Name}}</option>
 					  					{{end}}
                                     </select>
                                 </div>
@@ -31,6 +31,10 @@
                                 <div class="field">
                                     <label>{{.i18n.Tr "username"}}</label>
                                     <label class="text-left">{{.User.Name}}</label>
+                                </div>
+                                <div class="field">
+                                    <label for="full-name">{{.i18n.Tr "settings.full_name"}}</label>
+                                    <input class="ipt ipt-large ipt-radius {{if .Err_FullName}}ipt-error{{end}}" id="full-name" name="fullname" type="text" value="{{.User.FullName}}" />
                                 </div>
                                 <div class="field">
                                     <label class="req" for="email">{{.i18n.Tr "email"}}</label>

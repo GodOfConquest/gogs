@@ -55,7 +55,7 @@ func Http(ctx *middleware.Context) {
 
 	repoUser, err := models.GetUserByName(username)
 	if err != nil {
-		if err == models.ErrUserNotExist {
+		if models.IsErrUserNotExist(err) {
 			ctx.Handle(404, "GetUserByName", nil)
 		} else {
 			ctx.Handle(500, "GetUserByName", err)
@@ -96,33 +96,37 @@ func Http(ctx *middleware.Context) {
 		// FIXME: middlewares/context.go did basic auth check already,
 		// maybe could use that one.
 		if len(auths) != 2 || auths[0] != "Basic" {
-			ctx.Handle(401, "no basic auth and digit auth", nil)
+			ctx.HandleText(401, "no basic auth and digit auth")
 			return
 		}
 		authUsername, authPasswd, err = base.BasicAuthDecode(auths[1])
 		if err != nil {
-			ctx.Handle(401, "no basic auth and digit auth", nil)
+			ctx.HandleText(401, "no basic auth and digit auth")
 			return
 		}
 
 		authUser, err = models.UserSignIn(authUsername, authPasswd)
 		if err != nil {
-			if err != models.ErrUserNotExist {
+			if !models.IsErrUserNotExist(err) {
 				ctx.Handle(500, "UserSignIn error: %v", err)
 				return
 			}
 
 			// Assume username now is a token.
-			token, err := models.GetAccessTokenBySha(authUsername)
+			token, err := models.GetAccessTokenBySHA(authUsername)
 			if err != nil {
-				if err == models.ErrAccessTokenNotExist {
-					ctx.Handle(401, "invalid token", nil)
+				if models.IsErrAccessTokenNotExist(err) {
+					ctx.HandleText(401, "invalid token")
 				} else {
 					ctx.Handle(500, "GetAccessTokenBySha", err)
 				}
 				return
 			}
-			authUser, err = models.GetUserById(token.Uid)
+			token.Updated = time.Now()
+			if err = models.UpdateAccessToekn(token); err != nil {
+				ctx.Handle(500, "UpdateAccessToekn", err)
+			}
+			authUser, err = models.GetUserByID(token.UID)
 			if err != nil {
 				ctx.Handle(500, "GetUserById", err)
 				return
@@ -138,23 +142,23 @@ func Http(ctx *middleware.Context) {
 
 			has, err := models.HasAccess(authUser, repo, tp)
 			if err != nil {
-				ctx.Handle(401, "no basic auth and digit auth", nil)
+				ctx.HandleText(401, "no basic auth and digit auth")
 				return
 			} else if !has {
 				if tp == models.ACCESS_MODE_READ {
 					has, err = models.HasAccess(authUser, repo, models.ACCESS_MODE_WRITE)
 					if err != nil || !has {
-						ctx.Handle(401, "no basic auth and digit auth", nil)
+						ctx.HandleText(401, "no basic auth and digit auth")
 						return
 					}
 				} else {
-					ctx.Handle(401, "no basic auth and digit auth", nil)
+					ctx.HandleText(401, "no basic auth and digit auth")
 					return
 				}
 			}
 
 			if !isPull && repo.IsMirror {
-				ctx.Handle(401, "can't push to mirror", nil)
+				ctx.HandleText(401, "can't push to mirror")
 				return
 			}
 		}
@@ -190,7 +194,10 @@ func Http(ctx *middleware.Context) {
 						refName := fields[2]
 
 						// FIXME: handle error.
-						models.Update(refName, oldCommitId, newCommitId, authUsername, username, reponame, authUser.Id)
+						if err = models.Update(refName, oldCommitId, newCommitId, authUsername, username, reponame, authUser.Id); err == nil {
+							models.HookQueue.AddRepoID(repo.ID)
+						}
+
 					}
 					lastLine = lastLine + size
 				} else {
@@ -289,6 +296,7 @@ func serviceReceivePack(hr handler) {
 
 func serviceRpc(rpc string, hr handler) {
 	w, r, dir := hr.w, hr.r, hr.Dir
+	defer r.Body.Close()
 
 	if !hasAccess(r, hr.Config, dir, rpc, true) {
 		renderNoAccess(w)

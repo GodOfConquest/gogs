@@ -321,6 +321,10 @@ func timeSince(then time.Time, lang string) string {
 	}
 }
 
+func RawTimeSince(t time.Time, lang string) string {
+	return timeSince(t, lang)
+}
+
 // TimeSince calculates the time interval and generate user-friendly string.
 func TimeSince(t time.Time, lang string) template.HTML {
 	return template.HTML(fmt.Sprintf(`<span class="time-since" title="%s">%s</span>`, t.Format(setting.TimeFormat), timeSince(t, lang)))
@@ -419,4 +423,31 @@ func Subtract(left interface{}, right interface{}) interface{} {
 	} else {
 		return fleft + float64(rleft) - (fright + float64(rright))
 	}
+}
+
+// StringsToInt64s converts a slice of string to a slice of int64.
+func StringsToInt64s(strs []string) []int64 {
+	ints := make([]int64, len(strs))
+	for i := range strs {
+		ints[i] = com.StrTo(strs[i]).MustInt64()
+	}
+	return ints
+}
+
+// Int64sToStrings converts a slice of int64 to a slice of string.
+func Int64sToStrings(ints []int64) []string {
+	strs := make([]string, len(ints))
+	for i := range ints {
+		strs[i] = com.ToStr(ints[i])
+	}
+	return strs
+}
+
+// Int64sToMap converts a slice of int64 to a int64 map.
+func Int64sToMap(ints []int64) map[int64]bool {
+	m := make(map[int64]bool)
+	for _, i := range ints {
+		m[i] = true
+	}
+	return m
 }

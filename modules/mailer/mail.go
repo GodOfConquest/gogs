@@ -156,7 +156,7 @@ func SendResetPasswdMail(r macaron.Render, u *models.User) {
 
 // SendIssueNotifyMail sends mail notification of all watchers of repository.
 func SendIssueNotifyMail(u, owner *models.User, repo *models.Repository, issue *models.Issue) ([]string, error) {
-	ws, err := models.GetWatchers(repo.Id)
+	ws, err := models.GetWatchers(repo.ID)
 	if err != nil {
 		return nil, errors.New("mail.NotifyWatchers(GetWatchers): " + err.Error())
 	}
@@ -167,7 +167,7 @@ func SendIssueNotifyMail(u, owner *models.User, repo *models.Repository, issue *
 		if u.Id == uid {
 			continue
 		}
-		u, err := models.GetUserById(uid)
+		u, err := models.GetUserByID(uid)
 		if err != nil {
 			return nil, errors.New("mail.NotifyWatchers(GetUserById): " + err.Error())
 		}
@@ -178,7 +178,7 @@ func SendIssueNotifyMail(u, owner *models.User, repo *models.Repository, issue *
 		return tos, nil
 	}
 
-	subject := fmt.Sprintf("[%s] %s(#%d)", repo.Name, issue.Name, issue.Index)
+	subject := fmt.Sprintf("[%s] %s (#%d)", repo.Name, issue.Name, issue.Index)
 	content := fmt.Sprintf("%s<br>-<br> <a href=\"%s%s/%s/issues/%d\">View it on Gogs</a>.",
 		base.RenderSpecialLink([]byte(issue.Content), owner.Name+"/"+repo.Name),
 		setting.AppUrl, owner.Name, repo.Name, issue.Index)
@@ -196,7 +196,7 @@ func SendIssueMentionMail(r macaron.Render, u, owner *models.User,
 		return nil
 	}
 
-	subject := fmt.Sprintf("[%s] %s(#%d)", repo.Name, issue.Name, issue.Index)
+	subject := fmt.Sprintf("[%s] %s (#%d)", repo.Name, issue.Name, issue.Index)
 
 	data := GetMailTmplData(nil)
 	data["IssueLink"] = fmt.Sprintf("%s/%s/issues/%d", owner.Name, repo.Name, issue.Index)

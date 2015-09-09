@@ -10,12 +10,19 @@ import (
 	"strings"
 
 	"github.com/Unknwon/macaron"
+	"github.com/mcuadros/go-version"
+	"github.com/mssola/user_agent"
 
 	"github.com/gogits/gogs/models"
 	"github.com/gogits/gogs/modules/base"
 	"github.com/gogits/gogs/modules/git"
 	"github.com/gogits/gogs/modules/log"
 	"github.com/gogits/gogs/modules/setting"
+)
+
+const (
+	FIREFOX_COPY_SUPPORT = "41.0"
+	CHROME_COPY_SUPPORT  = "43.0.2356"
 )
 
 func ApiRepoAssignment() macaron.Handler {
@@ -34,7 +41,7 @@ func ApiRepoAssignment() macaron.Handler {
 		} else {
 			u, err = models.GetUserByName(userName)
 			if err != nil {
-				if err == models.ErrUserNotExist {
+				if models.IsErrUserNotExist(err) {
 					ctx.Error(404)
 				} else {
 					ctx.JSON(500, &base.ApiJsonErr{"GetUserByName: " + err.Error(), base.DOC_URL})
@@ -111,7 +118,7 @@ func RepoRef() macaron.Handler {
 				ctx.Handle(500, "GetCommitOfBranch", err)
 				return
 			}
-			ctx.Repo.CommitId = ctx.Repo.Commit.Id.String()
+			ctx.Repo.CommitID = ctx.Repo.Commit.Id.String()
 			ctx.Repo.IsBranch = true
 
 		} else {
@@ -142,7 +149,7 @@ func RepoRef() macaron.Handler {
 					ctx.Handle(500, "GetCommitOfBranch", err)
 					return
 				}
-				ctx.Repo.CommitId = ctx.Repo.Commit.Id.String()
+				ctx.Repo.CommitID = ctx.Repo.Commit.Id.String()
 
 			} else if ctx.Repo.GitRepo.IsTagExist(refName) {
 				ctx.Repo.IsTag = true
@@ -151,10 +158,10 @@ func RepoRef() macaron.Handler {
 					ctx.Handle(500, "GetCommitOfTag", err)
 					return
 				}
-				ctx.Repo.CommitId = ctx.Repo.Commit.Id.String()
+				ctx.Repo.CommitID = ctx.Repo.Commit.Id.String()
 			} else if len(refName) == 40 {
 				ctx.Repo.IsCommit = true
-				ctx.Repo.CommitId = refName
+				ctx.Repo.CommitID = refName
 
 				ctx.Repo.Commit, err = ctx.Repo.GitRepo.GetCommit(refName)
 				if err != nil {
@@ -169,7 +176,7 @@ func RepoRef() macaron.Handler {
 
 		ctx.Repo.BranchName = refName
 		ctx.Data["BranchName"] = ctx.Repo.BranchName
-		ctx.Data["CommitId"] = ctx.Repo.CommitId
+		ctx.Data["CommitID"] = ctx.Repo.CommitID
 		ctx.Data["IsBranch"] = ctx.Repo.IsBranch
 		ctx.Data["IsTag"] = ctx.Repo.IsTag
 		ctx.Data["IsCommit"] = ctx.Repo.IsCommit
@@ -180,6 +187,41 @@ func RepoRef() macaron.Handler {
 			return
 		}
 		ctx.Data["CommitsCount"] = ctx.Repo.CommitsCount
+	}
+}
+
+func RetrieveBaseRepo(ctx *Context, repo *models.Repository) {
+	// Non-fork repository will not return error in this method.
+	if err := repo.GetBaseRepo(); err != nil {
+		if models.IsErrRepoNotExist(err) {
+			repo.IsFork = false
+			repo.ForkID = 0
+			return
+		}
+		ctx.Handle(500, "GetBaseRepo", err)
+		return
+	} else if err = repo.BaseRepo.GetOwner(); err != nil {
+		ctx.Handle(500, "BaseRepo.GetOwner", err)
+		return
+	}
+
+	bsaeRepo := repo.BaseRepo
+	baseGitRepo, err := git.OpenRepository(models.RepoPath(bsaeRepo.Owner.Name, bsaeRepo.Name))
+	if err != nil {
+		ctx.Handle(500, "OpenRepository", err)
+		return
+	}
+	if len(bsaeRepo.DefaultBranch) > 0 && baseGitRepo.IsBranchExist(bsaeRepo.DefaultBranch) {
+		ctx.Data["BaseDefaultBranch"] = bsaeRepo.DefaultBranch
+	} else {
+		baseBranches, err := baseGitRepo.GetBranches()
+		if err != nil {
+			ctx.Handle(500, "GetBranches", err)
+			return
+		}
+		if len(baseBranches) > 0 {
+			ctx.Data["BaseDefaultBranch"] = baseBranches[0]
+		}
 	}
 }
 
@@ -210,7 +252,7 @@ func RepoAssignment(redirect bool, args ...bool) macaron.Handler {
 		} else {
 			u, err = models.GetUserByName(userName)
 			if err != nil {
-				if err == models.ErrUserNotExist {
+				if models.IsErrUserNotExist(err) {
 					ctx.Handle(404, "GetUserByName", err)
 				} else {
 					ctx.Handle(500, "GetUserByName", err)
@@ -250,7 +292,7 @@ func RepoAssignment(redirect bool, args ...bool) macaron.Handler {
 		ctx.Data["HasAccess"] = true
 
 		if repo.IsMirror {
-			ctx.Repo.Mirror, err = models.GetMirror(repo.Id)
+			ctx.Repo.Mirror, err = models.GetMirror(repo.ID)
 			if err != nil {
 				ctx.Handle(500, "GetMirror", err)
 				return
@@ -258,8 +300,6 @@ func RepoAssignment(redirect bool, args ...bool) macaron.Handler {
 			ctx.Data["MirrorInterval"] = ctx.Repo.Mirror.Interval
 		}
 
-		repo.NumOpenIssues = repo.NumIssues - repo.NumClosedIssues
-		repo.NumOpenMilestones = repo.NumMilestones - repo.NumClosedMilestones
 		ctx.Repo.Repository = repo
 		ctx.Data["IsBareRepo"] = ctx.Repo.Repository.IsBare
 
@@ -275,6 +315,7 @@ func RepoAssignment(redirect bool, args ...bool) macaron.Handler {
 			return
 		}
 		ctx.Data["RepoLink"] = ctx.Repo.RepoLink
+		ctx.Data["RepoRelPath"] = ctx.Repo.Owner.Name + "/" + ctx.Repo.Repository.Name
 
 		tags, err := ctx.Repo.GitRepo.GetTags()
 		if err != nil {
@@ -284,17 +325,18 @@ func RepoAssignment(redirect bool, args ...bool) macaron.Handler {
 		ctx.Data["Tags"] = tags
 		ctx.Repo.Repository.NumTags = len(tags)
 
-		// Non-fork repository will not return error in this method.
-		if err = repo.GetForkRepo(); err != nil {
-			ctx.Handle(500, "GetForkRepo", err)
-			return
+		if repo.IsFork {
+			RetrieveBaseRepo(ctx, repo)
+			if ctx.Written() {
+				return
+			}
 		}
 
 		ctx.Data["Title"] = u.Name + "/" + repo.Name
 		ctx.Data["Repository"] = repo
 		ctx.Data["Owner"] = ctx.Repo.Repository.Owner
-		ctx.Data["IsRepositoryOwner"] = ctx.Repo.AccessMode >= models.ACCESS_MODE_WRITE
-		ctx.Data["IsRepositoryAdmin"] = ctx.Repo.AccessMode >= models.ACCESS_MODE_ADMIN
+		ctx.Data["IsRepositoryOwner"] = ctx.Repo.IsOwner()
+		ctx.Data["IsRepositoryAdmin"] = ctx.Repo.IsAdmin()
 
 		ctx.Data["DisableSSH"] = setting.DisableSSH
 		ctx.Repo.CloneLink, err = repo.CloneLink()
@@ -320,8 +362,8 @@ func RepoAssignment(redirect bool, args ...bool) macaron.Handler {
 		}
 
 		if ctx.IsSigned {
-			ctx.Data["IsWatchingRepo"] = models.IsWatching(ctx.User.Id, repo.Id)
-			ctx.Data["IsStaringRepo"] = models.IsStaring(ctx.User.Id, repo.Id)
+			ctx.Data["IsWatchingRepo"] = models.IsWatching(ctx.User.Id, repo.ID)
+			ctx.Data["IsStaringRepo"] = models.IsStaring(ctx.User.Id, repo.ID)
 		}
 
 		ctx.Data["TagName"] = ctx.Repo.TagName
@@ -335,8 +377,8 @@ func RepoAssignment(redirect bool, args ...bool) macaron.Handler {
 
 		// If not branch selected, try default one.
 		// If default branch doesn't exists, fall back to some other branch.
-		if ctx.Repo.BranchName == "" {
-			if ctx.Repo.Repository.DefaultBranch != "" && gitRepo.IsBranchExist(ctx.Repo.Repository.DefaultBranch) {
+		if len(ctx.Repo.BranchName) == 0 {
+			if len(ctx.Repo.Repository.DefaultBranch) > 0 && gitRepo.IsBranchExist(ctx.Repo.Repository.DefaultBranch) {
 				ctx.Repo.BranchName = ctx.Repo.Repository.DefaultBranch
 			} else if len(brs) > 0 {
 				ctx.Repo.BranchName = brs[0]
@@ -344,13 +386,20 @@ func RepoAssignment(redirect bool, args ...bool) macaron.Handler {
 		}
 
 		ctx.Data["BranchName"] = ctx.Repo.BranchName
-		ctx.Data["CommitId"] = ctx.Repo.CommitId
+		ctx.Data["CommitID"] = ctx.Repo.CommitID
+
+		userAgent := ctx.Req.Header.Get("User-Agent")
+		ua := user_agent.New(userAgent)
+		browserName, browserVer := ua.Browser()
+
+		ctx.Data["BrowserSupportsCopy"] = (browserName == "Chrome" && version.Compare(browserVer, CHROME_COPY_SUPPORT, ">=")) ||
+			(browserName == "Firefox" && version.Compare(browserVer, FIREFOX_COPY_SUPPORT, ">="))
 	}
 }
 
-func RequireAdmin() macaron.Handler {
+func RequireRepoAdmin() macaron.Handler {
 	return func(ctx *Context) {
-		if ctx.Repo.AccessMode < models.ACCESS_MODE_ADMIN {
+		if !ctx.Repo.IsAdmin() {
 			if !ctx.IsSigned {
 				ctx.SetCookie("redirect_to", "/"+url.QueryEscape(setting.AppSubUrl+ctx.Req.RequestURI), 0, setting.AppSubUrl)
 				ctx.Redirect(setting.AppSubUrl + "/user/login")

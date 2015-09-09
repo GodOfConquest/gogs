@@ -5,7 +5,12 @@
 package migrations
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
+	"io/ioutil"
+	"os"
+	"path"
 	"strings"
 	"time"
 
@@ -15,6 +20,7 @@ import (
 
 	"github.com/gogits/gogs/modules/log"
 	"github.com/gogits/gogs/modules/setting"
+	gouuid "github.com/gogits/gogs/modules/uuid"
 )
 
 const _MIN_DB_VER = 0
@@ -51,11 +57,14 @@ type Version struct {
 // If you want to "retire" a migration, remove it from the top of the list and
 // update _MIN_VER_DB accordingly
 var migrations = []Migration{
-	NewMigration("generate collaboration from access", accessToCollaboration), // V0 -> V1:v0.5.13
-	NewMigration("make authorize 4 if team is owners", ownerTeamUpdate),       // V1 -> V2:v0.5.13
-	NewMigration("refactor access table to use id's", accessRefactor),         // V2 -> V3:v0.5.13
-	NewMigration("generate team-repo from team", teamToTeamRepo),              // V3 -> V4:v0.5.13
-	NewMigration("fix locale file load panic", fixLocaleFileLoadPanic),        // V4 -> V5:v0.6.0
+	NewMigration("generate collaboration from access", accessToCollaboration),    // V0 -> V1:v0.5.13
+	NewMigration("make authorize 4 if team is owners", ownerTeamUpdate),          // V1 -> V2:v0.5.13
+	NewMigration("refactor access table to use id's", accessRefactor),            // V2 -> V3:v0.5.13
+	NewMigration("generate team-repo from team", teamToTeamRepo),                 // V3 -> V4:v0.5.13
+	NewMigration("fix locale file load panic", fixLocaleFileLoadPanic),           // V4 -> V5:v0.6.0
+	NewMigration("trim action compare URL prefix", trimCommitActionAppUrlPrefix), // V5 -> V6:v0.6.3
+	NewMigration("generate issue-label from issue", issueToIssueLabel),           // V6 -> V7:v0.6.4
+	NewMigration("refactor attachment table", attachmentRefactor),                // V7 -> V8:v0.6.4
 }
 
 // Migrate database to current version
@@ -94,6 +103,12 @@ func Migrate(x *xorm.Engine) error {
 	}
 
 	v := currentVersion.Version
+	if int(v-_MIN_DB_VER) > len(migrations) {
+		// User downgraded Gogs.
+		currentVersion.Version = int64(len(migrations) + _MIN_DB_VER)
+		_, err = x.Id(1).Update(currentVersion)
+		return err
+	}
 	for i, m := range migrations[v-_MIN_DB_VER:] {
 		log.Info("Migration: %s", m.Description())
 		if err = m.Migrate(x); err != nil {
@@ -128,6 +143,9 @@ func accessToCollaboration(x *xorm.Engine) (err error) {
 
 	results, err := x.Query("SELECT u.id AS `uid`, a.repo_name AS `repo`, a.mode AS `mode`, a.created as `created` FROM `access` a JOIN `user` u ON a.user_name=u.lower_name")
 	if err != nil {
+		if strings.Contains(err.Error(), "no such column") {
+			return nil
+		}
 		return err
 	}
 
@@ -276,6 +294,9 @@ func accessRefactor(x *xorm.Engine) (err error) {
 
 		results, err = x.Query("SELECT `id`,`authorize`,`repo_ids` FROM `team` WHERE org_id=? AND authorize>? ORDER BY `authorize` ASC", ownerID, int(minAccessLevel))
 		if err != nil {
+			if strings.Contains(err.Error(), "no such column") {
+				return nil
+			}
 			return fmt.Errorf("select teams from org: %v", err)
 		}
 
@@ -337,6 +358,9 @@ func teamToTeamRepo(x *xorm.Engine) error {
 
 	results, err := x.Query("SELECT `id`,`org_id`,`repo_ids` FROM `team`")
 	if err != nil {
+		if strings.Contains(err.Error(), "no such column") {
+			return nil
+		}
 		return fmt.Errorf("select teams: %v", err)
 	}
 	for _, team := range results {
@@ -367,7 +391,7 @@ func teamToTeamRepo(x *xorm.Engine) error {
 	}
 
 	if err = sess.Sync2(new(TeamRepo)); err != nil {
-		return fmt.Errorf("sync: %v", err)
+		return fmt.Errorf("sync2: %v", err)
 	} else if _, err = sess.Insert(teamRepos); err != nil {
 		return fmt.Errorf("insert team-repos: %v", err)
 	}
@@ -388,4 +412,197 @@ func fixLocaleFileLoadPanic(_ *xorm.Engine) error {
 
 	setting.Langs = strings.Split(strings.Replace(strings.Join(setting.Langs, ","), "fr-CA", "fr-FR", 1), ",")
 	return nil
+}
+
+func trimCommitActionAppUrlPrefix(x *xorm.Engine) error {
+	type PushCommit struct {
+		Sha1        string
+		Message     string
+		AuthorEmail string
+		AuthorName  string
+	}
+
+	type PushCommits struct {
+		Len        int
+		Commits    []*PushCommit
+		CompareUrl string
+	}
+
+	type Action struct {
+		ID      int64  `xorm:"pk autoincr"`
+		Content string `xorm:"TEXT"`
+	}
+
+	results, err := x.Query("SELECT `id`,`content` FROM `action` WHERE `op_type`=?", 5)
+	if err != nil {
+		return fmt.Errorf("select commit actions: %v", err)
+	}
+
+	sess := x.NewSession()
+	defer sessionRelease(sess)
+	if err = sess.Begin(); err != nil {
+		return err
+	}
+
+	var pushCommits *PushCommits
+	for _, action := range results {
+		actID := com.StrTo(string(action["id"])).MustInt64()
+		if actID == 0 {
+			continue
+		}
+
+		pushCommits = new(PushCommits)
+		if err = json.Unmarshal(action["content"], pushCommits); err != nil {
+			return fmt.Errorf("unmarshal action content[%s]: %v", actID, err)
+		}
+
+		infos := strings.Split(pushCommits.CompareUrl, "/")
+		if len(infos) <= 4 {
+			continue
+		}
+		pushCommits.CompareUrl = strings.Join(infos[len(infos)-4:], "/")
+
+		p, err := json.Marshal(pushCommits)
+		if err != nil {
+			return fmt.Errorf("marshal action content[%s]: %v", actID, err)
+		}
+
+		if _, err = sess.Id(actID).Update(&Action{
+			Content: string(p),
+		}); err != nil {
+			return fmt.Errorf("update action[%d]: %v", actID, err)
+		}
+	}
+	return sess.Commit()
+}
+
+func issueToIssueLabel(x *xorm.Engine) error {
+	type IssueLabel struct {
+		ID      int64 `xorm:"pk autoincr"`
+		IssueID int64 `xorm:"UNIQUE(s)"`
+		LabelID int64 `xorm:"UNIQUE(s)"`
+	}
+
+	issueLabels := make([]*IssueLabel, 0, 50)
+	results, err := x.Query("SELECT `id`,`label_ids` FROM `issue`")
+	if err != nil {
+		if strings.Contains(err.Error(), "no such column") {
+			return nil
+		}
+		return fmt.Errorf("select issues: %v", err)
+	}
+	for _, issue := range results {
+		issueID := com.StrTo(issue["id"]).MustInt64()
+
+		// Just in case legacy code can have duplicated IDs for same label.
+		mark := make(map[int64]bool)
+		for _, idStr := range strings.Split(string(issue["label_ids"]), "|") {
+			labelID := com.StrTo(strings.TrimPrefix(idStr, "$")).MustInt64()
+			if labelID == 0 || mark[labelID] {
+				continue
+			}
+
+			mark[labelID] = true
+			issueLabels = append(issueLabels, &IssueLabel{
+				IssueID: issueID,
+				LabelID: labelID,
+			})
+		}
+	}
+
+	sess := x.NewSession()
+	defer sessionRelease(sess)
+	if err = sess.Begin(); err != nil {
+		return err
+	}
+
+	if err = sess.Sync2(new(IssueLabel)); err != nil {
+		return fmt.Errorf("sync2: %v", err)
+	} else if _, err = sess.Insert(issueLabels); err != nil {
+		return fmt.Errorf("insert issue-labels: %v", err)
+	}
+
+	return sess.Commit()
+}
+
+func attachmentRefactor(x *xorm.Engine) error {
+	type Attachment struct {
+		ID   int64  `xorm:"pk autoincr"`
+		UUID string `xorm:"uuid INDEX"`
+
+		// For rename purpose.
+		Path    string `xorm:"-"`
+		NewPath string `xorm:"-"`
+	}
+
+	results, err := x.Query("SELECT * FROM `attachment`")
+	if err != nil {
+		return fmt.Errorf("select attachments: %v", err)
+	}
+
+	attachments := make([]*Attachment, 0, len(results))
+	for _, attach := range results {
+		if !com.IsExist(string(attach["path"])) {
+			// If the attachment is already missing, there is no point to update it.
+			continue
+		}
+		attachments = append(attachments, &Attachment{
+			ID:   com.StrTo(attach["id"]).MustInt64(),
+			UUID: gouuid.NewV4().String(),
+			Path: string(attach["path"]),
+		})
+	}
+
+	sess := x.NewSession()
+	defer sessionRelease(sess)
+	if err = sess.Begin(); err != nil {
+		return err
+	}
+
+	if err = sess.Sync2(new(Attachment)); err != nil {
+		return fmt.Errorf("Sync2: %v", err)
+	}
+
+	// Note: Roll back for rename can be a dead loop,
+	// 	so produces a backup file.
+	var buf bytes.Buffer
+	buf.WriteString("# old path -> new path\n")
+
+	// Update database first because this is where error happens the most often.
+	for _, attach := range attachments {
+		if _, err = sess.Id(attach.ID).Update(attach); err != nil {
+			return err
+		}
+
+		attach.NewPath = path.Join(setting.AttachmentPath, attach.UUID[0:1], attach.UUID[1:2], attach.UUID)
+		buf.WriteString(attach.Path)
+		buf.WriteString("\t")
+		buf.WriteString(attach.NewPath)
+		buf.WriteString("\n")
+	}
+
+	// Then rename attachments.
+	isSucceed := true
+	defer func() {
+		if isSucceed {
+			return
+		}
+
+		dumpPath := path.Join(setting.LogRootPath, "attachment_path.dump")
+		ioutil.WriteFile(dumpPath, buf.Bytes(), 0666)
+		fmt.Println("Fail to rename some attachments, old and new paths are saved into:", dumpPath)
+	}()
+	for _, attach := range attachments {
+		if err = os.MkdirAll(path.Dir(attach.NewPath), os.ModePerm); err != nil {
+			isSucceed = false
+			return err
+		}
+
+		if err = os.Rename(attach.Path, attach.NewPath); err != nil {
+			isSucceed = false
+			return err
+		}
+	}
+
+	return sess.Commit()
 }

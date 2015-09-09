@@ -20,6 +20,10 @@ import (
 	"github.com/gogits/gogs/modules/setting"
 )
 
+func Safe(raw string) template.HTML {
+	return template.HTML(raw)
+}
+
 func Str2html(raw string) template.HTML {
 	return template.HTML(Sanitizer.Sanitize(raw))
 }
@@ -55,6 +59,9 @@ func ShortSha(sha1 string) string {
 func DetectEncoding(content []byte) (string, error) {
 	detector := chardet.NewTextDetector()
 	result, err := detector.DetectBest(content)
+	if result.Charset != "UTF-8" && len(setting.AnsiCharset) > 0 {
+		return setting.AnsiCharset, err
+	}
 	return result.Charset, err
 }
 
@@ -64,14 +71,13 @@ func ToUtf8WithErr(content []byte) (error, string) {
 		return err, ""
 	}
 
-	if charsetLabel == "utf8" {
+	if charsetLabel == "UTF-8" {
 		return nil, string(content)
 	}
 
 	encoding, _ := charset.Lookup(charsetLabel)
-
 	if encoding == nil {
-		return fmt.Errorf("unknow char decoder %s", charsetLabel), string(content)
+		return fmt.Errorf("unknown char decoder %s", charsetLabel), string(content)
 	}
 
 	result, n, err := transform.String(encoding.NewDecoder(), string(content))
@@ -115,20 +121,19 @@ var TemplateFuncs template.FuncMap = map[string]interface{}{
 	"AppDomain": func() string {
 		return setting.Domain
 	},
-	"CdnMode": func() bool {
-		return setting.ProdMode && !setting.OfflineMode
-	},
 	"DisableGravatar": func() bool {
 		return setting.DisableGravatar
 	},
 	"LoadTimes": func(startTime time.Time) string {
 		return fmt.Sprint(time.Since(startTime).Nanoseconds()/1e6) + "ms"
 	},
-	"AvatarLink": AvatarLink,
-	"Str2html":   Str2html,
-	"TimeSince":  TimeSince,
-	"FileSize":   FileSize,
-	"Subtract":   Subtract,
+	"AvatarLink":   AvatarLink,
+	"Safe":         Safe,
+	"Str2html":     Str2html,
+	"TimeSince":    TimeSince,
+	"RawTimeSince": RawTimeSince,
+	"FileSize":     FileSize,
+	"Subtract":     Subtract,
 	"Add": func(a, b int) int {
 		return a + b
 	},
@@ -175,7 +180,7 @@ var TemplateFuncs template.FuncMap = map[string]interface{}{
 	"Oauth2Name":            Oauth2Name,
 	"ToUtf8":                ToUtf8,
 	"EscapePound": func(str string) string {
-		return strings.Replace(str, "#", "%23", -1)
+		return strings.Replace(strings.Replace(str, "%", "%25", -1), "#", "%23", -1)
 	},
 	"RenderCommitMessage": RenderCommitMessage,
 }
@@ -186,8 +191,12 @@ type Actioner interface {
 	GetActEmail() string
 	GetRepoUserName() string
 	GetRepoName() string
+	GetRepoPath() string
+	GetRepoLink() string
 	GetBranch() string
 	GetContent() string
+	GetCreate() time.Time
+	GetIssueInfos() []string
 }
 
 // ActionIcon accepts a int that represents action operation type
